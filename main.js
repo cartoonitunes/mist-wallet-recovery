@@ -1,0 +1,386 @@
+global._ = require('./modules/utils/underscore');
+
+const fs = require('fs');
+const electron = require('electron');
+const app = require('app');  // Module to control application life.
+const timesync = require("os-timesync");
+const BrowserWindow = require('browser-window');  // Module to create native browser window.
+const Minimongo = require('./modules/minimongoDb.js');
+const syncMinimongo = require('./modules/syncMinimongo.js');
+const ipc = electron.ipcMain;
+const dialog = require('dialog');
+const packageJson = require('./package.json');
+const i18n = require('./modules/i18n.js');
+
+
+// GLOBAL Variables
+global.path = {
+    HOME: app.getPath('home'),
+    APPDATA: app.getPath('appData'), // Application Support/
+    USERDATA: app.getPath('userData') // Application Aupport/Mist
+};
+
+global.appName = 'Mist';
+
+global.production = false;
+global.mode = 'wallet';
+
+global.version = packageJson.version;
+global.license = packageJson.license;
+
+
+require('./modules/ipcCommunicator.js');
+const appMenu = require('./modules/menuItems');
+const ipcProviderBackend = require('./modules/ipc/ipcProviderBackend.js');
+const NodeConnector = require('./modules/ipc/nodeConnector.js');
+const popupWindow = require('./modules/popupWindow.js');
+const ethereumNodes = require('./modules/ethereumNodes.js');
+const getIpcPath = require('./modules/ipc/getIpcPath.js');
+var ipcPath = getIpcPath();
+
+
+global.mainWindow = null;
+global.windows = {};
+global.webviews = [];
+
+global.nodes = {
+    geth: null,
+    eth: null
+};
+global.network = 'main'; // or 'test', will be set by the file later
+global.mining = false;
+
+global.icon = __dirname +'/icons/'+ global.mode +'/icon.png';
+
+global.language = 'en';
+global.i18n = i18n; // TODO: detect language switches somehow
+
+global.Tabs = Minimongo('tabs');
+global.nodeConnector = new NodeConnector(ipcPath);
+
+
+// INTERFACE PATHS
+global.interfaceAppUrl;
+global.interfacePopupsUrl;
+
+// WALLET
+if(global.mode === 'wallet') {
+    global.interfaceAppUrl = (global.production)
+        ? 'file://' + __dirname + '/interface/wallet/index.html'
+        : 'http://localhost:3050';
+    global.interfacePopupsUrl = (global.production)
+        ? 'file://' + __dirname + '/interface/index.html'
+        : 'http://localhost:3000';
+
+// MIST
+} else {
+    global.interfaceAppUrl = global.interfacePopupsUrl = (global.production)
+        ? 'file://' + __dirname + '/interface/index.html'
+        : 'http://localhost:3000';
+}
+
+
+// const getCurrentKeyboardLayout = require('keyboard-layout');
+// const etcKeyboard = require('etc-keyboard');
+// console.log(getCurrentKeyboardLayout());
+// etcKeyboard(function (err, layout) {
+//     console.log('KEYBOARD:', layout);
+// });
+
+
+// const Menu = require('menu');
+// const Tray = require('tray');
+// var appIcon = null;
+
+
+
+// const processRef = global.process;
+// process.nextTick(function() { global.process = processRef; });
+
+
+// prevent crashed and close gracefully
+process.on('uncaughtException', function(error){
+    console.log('UNCAUGHT EXCEPTION', error.stack || error);
+    // var stack = new Error().stack;
+    // console.log(stack);
+
+    app.quit();
+});
+
+// Quit when all windows are closed.
+app.on('window-all-closed', function() {
+    // if (process.platform != 'darwin')
+    app.quit();
+});
+
+// Listen to custom protocole incoming messages, needs registering of URL schemes
+app.on('open-url', function (e, url) {
+    console.log('Open URL', url);
+});
+
+
+// app.on('will-quit', function(event){
+//     event.preventDefault()
+// });
+
+var killedSockets = false;
+app.on('before-quit', function(event){
+    if(!killedSockets)
+        event.preventDefault();
+
+    // CLEAR open IPC sockets to geth
+    _.each(global.sockets, function(socket){
+        if(socket) {
+            console.log('Closing Socket ', socket.id);
+            socket.destroy();
+        }
+    });
+
+
+    // delay quit, so the sockets can close
+    setTimeout(function(){
+        killedSockets = true;
+        ethereumNodes.stopNodes(function(){
+            app.quit();
+        });
+    }, 500);
+});
+
+
+// Emitted when the application is activated while there is no opened windows.
+// It usually happens when a user has closed all of application's windows and then
+// click on the application's dock icon.
+// app.on('activate-with-no-open-windows', function () {
+//     if (global.mainWindow) {
+//         global.mainWindow.show();
+//     }
+// });
+
+
+// append ignore GPU blacklist on linux
+// if(process.platform === 'freebsd' ||
+//    process.platform === 'linux' ||
+//    process.platform === 'sunos') {
+//     app.commandLine.appendSwitch('ignore-cpu-blacklist');
+// }
+
+var appStartWindow;
+var nodeType = 'geth';
+var logFunction = function(data) {
+    data = data.toString().replace(/[\r\n]+/,'');
+    console.log('NODE LOG:', data);
+
+    // if(~data.indexOf('Block synchronisation started') && global.nodes[nodeType]) {
+    //     global.nodes[nodeType].stdout.removeListener('data', logFunction);
+    //     global.nodes[nodeType].stderr.removeListener('data', logFunction);
+    // }
+
+    // show line if its not empty or "------"
+    if(appStartWindow && !/^\-*$/.test(data) && !_.isEmpty(data)) {
+        console.log('"'+ data +'"');
+        appStartWindow.webContents.send('startScreenText', 'logText', data.replace(/^.*[0-9]\]/,''));
+    }
+};
+
+// This method will be called when Electron has done everything
+// initialization and ready for creating browser windows.
+app.on('ready', function() {
+
+    // init prepared popup window
+    popupWindow.loadingWindow.init();
+
+    // initialize the IPC provider on the main window
+    ipcProviderBackend();
+
+    // instantiate custom protocols
+    require('./customProtocols.js');
+
+    // add menu already here, so we have copy and past functionality
+    appMenu();
+
+
+    // appIcon = new Tray('./icons/icon-tray.png');
+    // var contextMenu = Menu.buildFromTemplate([
+    //     { label: 'Item1', type: 'radio' },
+    //     { label: 'Item2', type: 'radio' },
+    //     { label: 'Item3', type: 'radio', checked: true },
+    //     { label: 'Item4', type: 'radio' },
+    // ]);
+    // appIcon.setToolTip('This is my application.');
+    // appIcon.setContextMenu(contextMenu);
+
+
+    // Create the browser window.
+
+    // MIST
+    if(global.mode === 'mist') {
+        global.mainWindow = new BrowserWindow({
+            title: global.appName,
+            show: false,
+            width: 1024 + 208,
+            height: 720,
+            icon: global.icon,
+            titleBarStyle: 'hidden-inset', //hidden-inset: more space
+            backgroundColor: '#D2D2D2',
+            acceptFirstMouse: true,
+            darkTheme: true,
+            webPreferences: {
+                preload: __dirname +'/modules/preloader/mistUI.js',
+                nodeIntegration: false,
+                'overlay-scrollbars': true,
+                webaudio: true,
+                webgl: false,
+                textAreasAreResizable: true,
+                webSecurity: false // necessary to make routing work on file:// protocol
+            }
+        });
+
+        syncMinimongo(Tabs, global.mainWindow.webContents);
+
+
+    // WALLET
+    } else {
+
+        global.mainWindow = new BrowserWindow({
+            title: global.appName,
+            show: false,
+            width: 1100,
+            height: 720,
+            icon: global.icon,
+            titleBarStyle: 'hidden-inset', //hidden-inset: more space
+            backgroundColor: '#F6F6F6',
+            acceptFirstMouse: true,
+            darkTheme: true,
+            webPreferences: {
+                preload: __dirname +'/modules/preloader/wallet.js',
+                nodeIntegration: false,
+                'overlay-fullscreen-video': true,
+                'overlay-scrollbars': true,
+                webaudio: true,
+                webgl: false,
+                textAreasAreResizable: true,
+                webSecurity: false // necessary to make routing work on file:// protocol
+            }
+        });
+    }
+
+    appStartWindow = new BrowserWindow({
+            title: global.appName,
+            width: 400,
+            height: 230,
+            icon: global.icon,
+            resizable: false,
+            backgroundColor: '#F6F6F6',
+            useContentSize: true,
+            frame: false,
+            webPreferences: {
+                preload: __dirname +'/modules/preloader/splashScreen.js',
+                nodeIntegration: false,
+                webSecurity: false // necessary to make routing work on file:// protocol
+            }
+        });
+    appStartWindow.loadURL(global.interfacePopupsUrl + '#splashScreen_'+ global.mode);//'file://' + __dirname + '/interface/startScreen/'+ global.mode +'.html');
+
+
+    // check time sync
+    // var ntpClient = require('ntp-client');
+    // ntpClient.getNetworkTime("pool.ntp.org", 123, function(err, date) {
+    timesync.checkEnabled(function (err, enabled) {
+        if(err) {
+            console.error('Couldn\'t get time from NTP time sync server.', err);
+            return;
+        }
+
+        if(!enabled) {
+            dialog.showMessageBox({
+                type: "warning",
+                buttons: ['OK'],
+                message: global.i18n.t('mist.errors.timeSync.title'),
+                detail: global.i18n.t('mist.errors.timeSync.description') +"\n\n"+ global.i18n.t('mist.errors.timeSync.'+ process.platform)
+            }, function(){
+            });
+        }
+    });
+
+
+
+    appStartWindow.webContents.on('did-finish-load', function() {
+        // Skip node connection and go directly to main window
+        // since we're using external RPC provider
+        console.log('Skipping local node connection, using external RPC provider');
+        
+        if(appStartWindow) {
+            appStartWindow.webContents.send('startScreenText', 'mist.startScreen.startedNode');
+        }
+        
+        // Close splash screen and start main window
+        setTimeout(function() {
+            startMainWindow(appStartWindow);
+        }, 1000);
+    });
+
+});
+
+
+/**
+Clears the socket
+
+@method clearSocket
+*/
+var clearSocket = function(socket, timeout){
+    if(timeout) {
+        ethereumNodes.stopNodes();
+    }
+
+    socket.removeAllListeners();
+    socket.destroy();
+    socket = null;
+}
+
+
+/**
+Start the main window and all its processes
+
+@method startMainWindow
+*/
+var startMainWindow = function(appStartWindow){
+
+    // remove the splash screen logger
+    if(global.nodes[nodeType]) {
+        global.nodes[nodeType].stdout.removeListener('data', logFunction);
+        global.nodes[nodeType].stderr.removeListener('data', logFunction);
+    }
+
+    // and load the index.html of the app.
+    console.log('Loading Interface at '+ global.interfaceAppUrl);
+    global.mainWindow.loadURL(global.interfaceAppUrl);
+
+    global.mainWindow.webContents.on('did-finish-load', function() {
+        popupWindow.loadingWindow.hide();
+
+        global.mainWindow.show();
+        // global.mainWindow.center();
+
+        if(appStartWindow)
+            appStartWindow.close();
+        appStartWindow = null;
+    });
+
+    // close app, when the main window is closed
+    global.mainWindow.on('closed', function() {
+        global.mainWindow = null;
+
+        app.quit();
+    });
+
+
+    // STARTUP PROCESSES
+
+
+    // instantiate the application menu
+    // ipc.on('setupWebviewDevToolsMenu', function(e, webviews){
+    Tracker.autorun(function(){
+        global.webviews = Tabs.find({},{sort: {position: 1}, fields: {name: 1, _id: 1}}).fetch();
+        appMenu(global.webviews);
+    });
+};

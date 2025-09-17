@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Mist Wallet Recovery Test</title>
+    <script src="https://cdn.jsdelivr.net/npm/web3@0.15.1/dist/web3.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/bignumber.js@2.1.4/bignumber.min.js"></script>
+</head>
+<body>
+    <h1>Mist Wallet Recovery Test</h1>
+    <p>This is a test page to help recover a wallet from the old Mist version.</p>
+    
+    <div id="status">Connecting to Ethereum node...</div>
+    
+    <h2>Wallet Recovery</h2>
+    <p>Please provide your keystore file and password to recover your wallet.</p>
+    
+    <form id="walletForm">
+        <div>
+            <label for="keystoreFile">Keystore File:</label>
+            <input type="file" id="keystoreFile" accept=".json" />
+        </div>
+        <div>
+            <label for="password">Password:</label>
+            <input type="password" id="password" />
+        </div>
+        <button type="submit">Recover Wallet</button>
+    </form>
+    
+    <div id="result"></div>
+
+    <script>
+        // Initialize web3 with external RPC
+        const web3 = new Web3(new Web3.providers.HttpProvider("http://localhost:8545"));
+        
+        // Check connection
+        web3.eth.getBlock(0, function(error, result) {
+            if (error) {
+                document.getElementById('status').innerHTML = 'Error connecting to Ethereum node: ' + error.message;
+                document.getElementById('status').style.color = 'red';
+            } else {
+                document.getElementById('status').innerHTML = 'Connected to Ethereum node. Network: ' + (result.hash === '0xd4e56740f876aef8c010b86a40d5f56745a118d0906a34e69aec8c0db1cb8fa3' ? 'Mainnet' : 'Other');
+                document.getElementById('status').style.color = 'green';
+            }
+        });
+        
+        // Handle wallet recovery
+        document.getElementById('walletForm').addEventListener('submit', function(e) {
+            e.preventDefault();
+            
+            const fileInput = document.getElementById('keystoreFile');
+            const password = document.getElementById('password').value;
+            
+            if (!fileInput.files[0]) {
+                alert('Please select a keystore file');
+                return;
+            }
+            
+            if (!password) {
+                alert('Please enter your password');
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const reader = new FileReader();
+            
+            reader.onload = function(e) {
+                try {
+                    const keystore = JSON.parse(e.target.result);
+                    
+                    // Try to recover the private key
+                    const account = web3.eth.accounts.decrypt(keystore, password);
+                    
+                    document.getElementById('result').innerHTML = 
+                        '<h3>Wallet Recovered Successfully!</h3>' +
+                        '<p><strong>Address:</strong> ' + account.address + '</p>' +
+                        '<p><strong>Private Key:</strong> ' + account.privateKey + '</p>' +
+                        '<p style="color: red;"><strong>WARNING:</strong> Keep your private key secure and never share it!</p>';
+                    
+                } catch (error) {
+                    document.getElementById('result').innerHTML = 
+                        '<h3>Error Recovering Wallet</h3>' +
+                        '<p style="color: red;">' + error.message + '</p>' +
+                        '<p>This could be due to:</p>' +
+                        '<ul>' +
+                        '<li>Incorrect password</li>' +
+                        '<li>Corrupted keystore file</li>' +
+                        '<li>Incompatible keystore format</li>' +
+                        '</ul>';
+                }
+            };
+            
+            reader.readAsText(file);
+        });
+    </script>
+</body>
+</html>

@@ -1,0 +1,5 @@
+node_modules/
+packages/
+interface_build/
+dist_wallet/
+dist_mist/
